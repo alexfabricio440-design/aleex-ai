@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Generador de videos</title>
+<style>
+:root{--bg:#f3f1ec;--card:#fff;--ink:#1d1b26;--mute:#6b6878;--line:#dcd8e4;--acc:#5b3df5;--acc2:#fff;--ok:#12805c;--err:#c2331f}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#15131c;--card:#1f1c2a;--ink:#f0eef8;--mute:#9a96ab;--line:#332f44;--acc:#8b75ff;--acc2:#15131c;--ok:#4cc79a;--err:#ff7a66}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 "Trebuchet MS","Segoe UI",system-ui,sans-serif;padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+main{max-width:920px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:1.8rem;margin:.2em 0 .1em;letter-spacing:-.02em}
+h2{font-size:1.05rem;margin:0}
+p.sub{color:var(--mute);margin:0 0 20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.card{background:var(--card);border:2px dashed var(--line);border-radius:14px;padding:14px;transition:border-color .15s}
+.card.over{border-color:var(--acc)}
+.card small{color:var(--mute);display:block;margin:2px 0 10px}
+.btn{font:inherit;border:0;border-radius:10px;padding:9px 14px;background:var(--ink);color:var(--bg);cursor:pointer}
+.btn:focus-visible,.step:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.files{list-style:none;margin:10px 0 0;padding:0;max-height:140px;overflow:auto;font-size:.85rem}
+.files li{display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-top:1px solid var(--line)}
+.files span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.files button{border:0;background:none;color:var(--err);cursor:pointer;font-size:1rem}
+.gen{margin:26px 0;background:var(--card);border-radius:18px;padding:22px;display:flex;flex-wrap:wrap;gap:20px;align-items:center;justify-content:space-between;border:1px solid var(--line)}
+.qty{display:flex;align-items:center;gap:12px}
+.step{width:46px;height:46px;border-radius:50%;border:2px solid var(--ink);background:none;color:var(--ink);font-size:1.5rem;cursor:pointer}
+#qty{font-size:2.6rem;font-weight:700;min-width:2ch;text-align:center}
+.go{font:inherit;font-size:1.2rem;font-weight:700;padding:16px 38px;border:0;border-radius:14px;background:var(--acc);color:var(--acc2);cursor:pointer}
+.go:disabled{opacity:.5;cursor:not-allowed}
+.opts{display:flex;gap:16px;flex-wrap:wrap;color:var(--mute);font-size:.9rem;width:100%}
+.opts select{font:inherit}
+.job{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.bar{height:8px;border-radius:5px;background:var(--line);overflow:hidden;margin:8px 0}
+.bar i{display:block;height:100%;width:0;background:var(--acc)}
+.job video{display:block;max-width:100%;max-height:420px;background:#000;border-radius:10px;margin:8px 0}
+.job a{color:var(--ok);font-weight:700}
+#msg{color:var(--err);min-height:1.4em}
+.note{color:var(--mute);font-size:.85rem}
+</style>
+</head>
+<body>
+<main>
+<h1>Generador de videos</h1>
+<p class="sub">Sube tus clips una vez, elige la cantidad y aprieta Generar.</p>
+
+<div class="grid" id="folders"></div>
+
+<section class="gen">
+  <div class="qty">
+    <button class="step" id="minus" aria-label="Menos">−</button>
+    <div id="qty">1</div>
+    <button class="step" id="plus" aria-label="Más">+</button>
+    <span class="note">videos</span>
+  </div>
+  <button class="go" id="go">Generar</button>
+  <div class="opts">
+    <label>Formato:
+      <select id="fmt"><option value="720x1280">Vertical 720×1280</option><option value="1280x720">Horizontal 1280×720</option></select></label>
+  </div>
+  <div id="msg" role="alert" style="width:100%"></div>
+</section>
+
+<div id="jobs"></div>
+<p class="note">Importante: mientras se genera, deja esta pestaña abierta y a la vista (el video se arma cuadro por cuadro y puede tardar más que su duración). Todo se procesa en tu dispositivo y no se sube a ningún lado.</p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js"></script>
+<script>
+const FOLDERS=[
+ {id:"hook",name:"Hooks",hint:"Videos de inicio",accept:"video/*"},
+ {id:"fill",name:"Relleno",hint:"Videos del medio",accept:"video/*"},
+ {id:"cta",name:"CTA",hint:"Videos de cierre",accept:"video/*"},
+ {id:"voice",name:"Voces",hint:"Audios ya grabados",accept:"audio/*,video/*"}
+];
+const $=s=>document.querySelector(s);
+let lib={hook:[],fill:[],cta:[],voice:[]};
+let used=new Set();
+
+/* ---- Almacenamiento en el navegador (IndexedDB) ---- */
+const dbp=new Promise((res,rej)=>{const r=indexedDB.open("vidgen",1);r.onupgradeneeded=()=>r.result.createObjectStore("files",{keyPath:"id",autoIncrement:true});r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+async function tx(mode,fn){const db=await dbp;return new Promise((res,rej)=>{const t=db.transaction("files",mode);const r=fn(t.objectStore("files"));t.oncomplete=()=>res(r.result);t.onerror=()=>rej(t.error)})}
+const dbAdd=f=>tx("readwrite",s=>s.add(f));
+const dbDel=id=>tx("readwrite",s=>s.delete(id));
+const dbAll=()=>tx("readonly",s=>s.getAll());
+
+/* ---- Interfaz de carpetas ---- */
+function drawFolders(){
+  const box=$("#folders");box.innerHTML="";
+  FOLDERS.forEach(f=>{
+    const c=document.createElement("div");c.className="card";
+    c.innerHTML=`<h2>${f.name} (${lib[f.id].length})</h2><small>${f.hint}</small>
+      <button class="btn">Agregar archivos</button>
+      <input type="file" multiple style="position:absolute;width:1px;height:1px;opacity:0">
+      <ul class="files"></ul>`;
+    const inp=c.querySelector("input");
+    c.querySelector("button").onclick=()=>inp.click();
+    inp.onchange=()=>addFiles(f.id,inp.files);
+    c.ondragover=e=>{e.preventDefault();c.classList.add("over")};
+    c.ondragleave=()=>c.classList.remove("over");
+    c.ondrop=e=>{e.preventDefault();c.classList.remove("over");addFiles(f.id,e.dataTransfer.files)};
+    const ul=c.querySelector("ul");
+    lib[f.id].forEach(it=>{
+      const li=document.createElement("li");
+      const sp=document.createElement("span");sp.textContent=it.name;
+      const b=document.createElement("button");b.textContent="✕";b.title="Quitar";
+      b.onclick=async()=>{await dbDel(it.id);lib[f.id]=lib[f.id].filter(x=>x.id!==it.id);drawFolders()};
+      li.append(sp,b);ul.append(li);
+    });
+    box.append(c);
+  });
+}
+async function addFiles(folder,files){
+  const m=$("#msg");m.textContent="";
+  for(const file of Array.from(files)){
+    try{
+      const item={folder,name:file.name,blob:file};
+      item.id=await dbAdd(item);lib[folder].push(item);
+    }catch(e){m.textContent="No se pudo guardar "+file.name+" ("+(e&&e.name||"error")+"). Prueba con un archivo más chico o con otro navegador."}
+  }
+  drawFolders();
+}
+async function init(){
+  try{(await dbAll()).forEach(it=>lib[it.folder]&&lib[it.folder].push(it))}catch(e){$("#msg").textContent="No se pudo abrir el almacenamiento del navegador."}
+  drawFolders();
+}
+
+/* ---- Cantidad ---- */
+let qty=1;
+$("#minus").onclick=()=>{qty=Math.max(1,qty-1);$("#qty").textContent=qty};
+$("#plus").onclick=()=>{qty=Math.min(20,qty+1);$("#qty").textContent=qty};
+
+/* ---- Elegir combinaciones sin repetir ---- */
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+function combo(){
+  for(let t=0;t<40;t++){
+    const hook=pick(lib.hook),cta=pick(lib.cta),voice=pick(lib.voice),key=hook.id+"-"+cta.id+"-"+voice.id;
+    if(!used.has(key)){used.add(key);return{hook,cta,voice}}
+  }
+  used.clear();return{hook:pick(lib.hook),cta:pick(lib.cta),voice:pick(lib.voice)};
+}
+
+/* ---- Utilidades de video ---- */
+function loadVideo(blob){
+  return new Promise((res,rej)=>{
+    const v=document.createElement("video");v.muted=true;v.playsInline=true;v.preload="auto";
+    v.src=URL.createObjectURL(blob);
+    v.onloadeddata=()=>res(v);v.onerror=()=>rej(new Error("No se pudo leer un clip"));
+  });
+}
+async function getDur(it){
+  if(!it._d){const v=await loadVideo(it.blob);it._d=v.duration;URL.revokeObjectURL(v.src)}
+  return it._d;
+}
+/* El video dura EXACTAMENTE lo que dura la voz: hook al inicio, CTA al final, relleno en medio (se recorta el último si sobra) */
+async function plan(job,T){
+  const hl=Math.min(await getDur(job.hook),T);
+  const cl=Math.min(await getDur(job.cta),T-hl);
+  const segs=[{item:job.hook,len:hl}];
+  let mid=T-hl-cl,last=null,guard=0;
+  while(mid>0.05&&guard++<300){
+    let f=pick(lib.fill);
+    if(lib.fill.length>1&&f===last)f=pick(lib.fill.filter(x=>x!==last));
+    const d=await getDur(f);if(!(d>0.2))continue;
+    const len=Math.min(d,mid);segs.push({item:f,len});mid-=len;last=f;
+  }
+  if(mid>0.5)throw new Error("Los clips de Relleno no se pudieron leer o son muy cortos");
+  if(cl>0.05)segs.push({item:job.cta,len:cl});
+  return segs;
+}
+
+/* ---- Render en vivo (respaldo) ---- */
+async function renderLive({segs,buf,T},W,H,onProg){
+  const canvas=document.createElement("canvas");canvas.width=W;canvas.height=H;
+  const g=canvas.getContext("2d");g.fillStyle="#000";g.fillRect(0,0,W,H);
+  const ac=new (window.AudioContext||window.webkitAudioContext)();await ac.resume();
+  const dest=ac.createMediaStreamDestination();
+  const stream=new MediaStream([...canvas.captureStream(30).getVideoTracks(),...dest.stream.getAudioTracks()]);
+  const mime=["video/mp4;codecs=avc1,mp4a.40.2","video/webm;codecs=vp9,opus","video/webm"].find(m=>MediaRecorder.isTypeSupported(m));
+  if(!mime)throw new Error("Este navegador no puede grabar video. Prueba con Chrome.");
+  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:5e6});
+  const chunks=[];rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+  const vids=[];for(const s of segs)vids.push(await loadVideo(s.item.blob));
+  let cur=null,done=0,alive=true;
+  function draw(){
+    if(!alive)return;
+    if(cur&&cur.videoWidth){
+      const s=Math.max(W/cur.videoWidth,H/cur.videoHeight),w=cur.videoWidth*s,h=cur.videoHeight*s;
+      g.drawImage(cur,(W-w)/2,(H-h)/2,w,h);
+    }
+    onProg((done+(cur?cur.currentTime:0))/T);
+    requestAnimationFrame(draw);
+  }
+  const stopped=new Promise(r=>rec.onstop=r);
+  rec.start(500);
+  const src=ac.createBufferSource();src.buffer=buf;src.connect(dest);src.start();
+  requestAnimationFrame(draw);
+  for(let i=0;i<vids.length;i++){
+    cur=vids[i];await cur.play();
+    await new Promise(r=>{cur.onended=r;const iv=setInterval(()=>{if(cur.currentTime>=segs[i].len){clearInterval(iv);r()}},15)});
+    cur.pause();done+=segs[i].len;
+  }
+  alive=false;try{src.stop()}catch(e){}
+  rec.stop();await stopped;ac.close();
+  vids.forEach(v=>URL.revokeObjectURL(v.src));
+  return{blob:new Blob(chunks,{type:mime.split(";")[0]}),ext:mime.startsWith("video/mp4")?"mp4":"webm",mode:"modo en vivo, puede trabarse",dur:T};
+}
+
+/* ---- Render fluido: cuadro por cuadro con WebCodecs ---- */
+const FPS=30;
+function seek(v,t){return new Promise(r=>{
+  const to=setTimeout(done,3000);
+  function done(){clearTimeout(to);v.onseeked=null;(function w(n){if(v.readyState>=2||n>40)r();else setTimeout(()=>w(n+1),25)})(0)}
+  if(Math.abs(v.currentTime-t)<1e-3&&v.readyState>=2){clearTimeout(to);r();return}
+  v.onseeked=done;v.currentTime=t;
+})}
+async function renderSmooth({segs,buf,T},W,H,onProg){
+  if(!window.VideoEncoder||!window.AudioEncoder||!window.Mp4Muxer)throw new Error("sin WebCodecs");
+  const vcfg={codec:"avc1.640028",width:W,height:H,bitrate:5e6,framerate:FPS};
+  if(!(await VideoEncoder.isConfigSupported(vcfg)).supported)throw new Error("video no soportado");
+  const ch=Math.min(2,buf.numberOfChannels),sr=buf.sampleRate;
+  let acodec=null;
+  for(const c of ["mp4a.40.2","opus"]){
+    try{if((await AudioEncoder.isConfigSupported({codec:c,sampleRate:sr,numberOfChannels:ch,bitrate:128000})).supported){acodec=c;break}}catch(e){}
+  }
+  if(!acodec)throw new Error("audio no soportado");
+  const muxer=new Mp4Muxer.Muxer({target:new Mp4Muxer.ArrayBufferTarget(),
+    video:{codec:"avc",width:W,height:H},
+    audio:{codec:acodec==="opus"?"opus":"aac",sampleRate:sr,numberOfChannels:ch},fastStart:"in-memory"});
+  let fail=null;
+  const venc=new VideoEncoder({output:(c,m)=>muxer.addVideoChunk(c,m),error:e=>fail=e});venc.configure(vcfg);
+  const aenc=new AudioEncoder({output:(c,m)=>muxer.addAudioChunk(c,m),error:e=>fail=e});
+  aenc.configure({codec:acodec,sampleRate:sr,numberOfChannels:ch,bitrate:128000});
+  const vids=[];for(const s of segs)vids.push(await loadVideo(s.item.blob));
+  const canvas=document.createElement("canvas");canvas.width=W;canvas.height=H;
+  const g=canvas.getContext("2d",{alpha:false});g.imageSmoothingQuality="high";
+  const Ftot=Math.round(T*FPS);let acc=0,prev=0;
+  segs.forEach((s,i)=>{acc+=s.len;const b=i===segs.length-1?Ftot:Math.round(acc*FPS);s.frames=Math.max(0,b-prev);prev=b});
+  let f=0;
+  for(let i=0;i<vids.length;i++){
+    const v=vids[i];
+    for(let k=0;k<segs[i].frames;k++,f++){
+      if(fail)throw fail;
+      await seek(v,Math.min((k+0.5)/FPS,Math.max(0,v.duration-0.02)));
+      const s=Math.max(W/v.videoWidth,H/v.videoHeight),w=v.videoWidth*s,h=v.videoHeight*s;
+      g.drawImage(v,(W-w)/2,(H-h)/2,w,h);
+      const fr=new VideoFrame(canvas,{timestamp:Math.round(f*1e6/FPS)});
+      venc.encode(fr,{keyFrame:f%60===0});fr.close();
+      while(venc.encodeQueueSize>8)await new Promise(r=>setTimeout(r,5));
+      if(f%5===0){onProg(f/Ftot);await new Promise(r=>setTimeout(r))}
+    }
+  }
+  const maxS=Math.min(buf.length,Math.round(Ftot/FPS*sr)),CH=4096;
+  for(let o=0;o<maxS;o+=CH){
+    const n=Math.min(CH,maxS-o),d=new Float32Array(n*ch);
+    for(let c=0;c<ch;c++)d.set(buf.getChannelData(c).subarray(o,o+n),c*n);
+    const ad=new AudioData({format:"f32-planar",sampleRate:sr,numberOfFrames:n,numberOfChannels:ch,timestamp:Math.round(o/sr*1e6),data:d});
+    aenc.encode(ad);ad.close();
+    while(aenc.encodeQueueSize>8)await new Promise(r=>setTimeout(r,5));
+  }
+  await venc.flush();await aenc.flush();
+  if(fail)throw fail;
+  muxer.finalize();
+  vids.forEach(v=>URL.revokeObjectURL(v.src));
+  return{blob:new Blob([muxer.target.buffer],{type:"video/mp4"}),ext:"mp4",mode:"modo fluido",dur:Ftot/FPS};
+}
+
+async function render(job,W,H,onProg){
+  const ac=new (window.AudioContext||window.webkitAudioContext)();
+  let buf;
+  try{buf=await ac.decodeAudioData(await job.voice.blob.arrayBuffer())}
+  catch(e){throw new Error("No se pudo leer el audio de la voz")}
+  ac.close();
+  const T=buf.duration,segs=await plan(job,T),c={segs,buf,T};
+  try{return await renderSmooth(c,W,H,onProg)}
+  catch(e){console.warn("Render fluido no disponible, uso modo en vivo:",e);onProg(0);return renderLive(c,W,H,onProg)}
+}
+
+/* ---- Botón Generar ---- */
+let busy=false;
+$("#go").onclick=async()=>{
+  const msg=$("#msg");msg.textContent="";
+  const need=FOLDERS.filter(f=>!lib[f.id].length).map(f=>f.name);
+  if(need.length){msg.textContent="Falta agregar archivos en: "+need.join(", ");return}
+  if(busy)return;busy=true;$("#go").disabled=true;
+  const [W,H]=$("#fmt").value.split("x").map(Number);
+  const jobs=[];
+  for(let i=1;i<=qty;i++){
+    const d=document.createElement("div");d.className="job";
+    d.innerHTML=`<b>Video ${i}</b> <span class="st">en espera</span><div class="bar"><i></i></div><span class="dl"></span>`;
+    $("#jobs").prepend(d);jobs.push(d);
+  }
+  const ready=[];
+  for(let i=0;i<qty;i++){
+    const d=jobs[i],st=d.querySelector(".st"),bar=d.querySelector("i");
+    try{
+      st.textContent="grabando…";
+      const r=await render(combo(),W,H,p=>bar.style.width=Math.min(100,p*100)+"%");
+      const url=URL.createObjectURL(r.blob),name=`video-${Date.now()}-${i+1}.${r.ext}`;
+      bar.style.width="100%";st.textContent="listo ✓ — dura "+r.dur.toFixed(1)+" s ("+r.mode+")";st.style.color="var(--ok)";
+      const a=document.createElement("a");a.href=url;a.download=name;a.textContent="Descargar";
+      const pv=document.createElement("video");pv.src=url;pv.controls=true;pv.playsInline=true;d.insertBefore(pv,d.querySelector(".dl"));d.querySelector(".dl").append(a);ready.push({url,name});
+    }catch(e){st.textContent="error: "+e.message;st.style.color="var(--err)"}
+  }
+  if(ready.length>1){
+    const b=document.createElement("button");b.className="btn";b.textContent="Descargar todos";
+    b.onclick=()=>ready.forEach((r,k)=>setTimeout(()=>{const a=document.createElement("a");a.href=r.url;a.download=r.name;a.click()},k*600));
+    $("#jobs").prepend(b);
+  }
+  busy=false;$("#go").disabled=false;
+};
+init();
+</script>
+</body>
+</html>
